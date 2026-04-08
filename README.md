@@ -161,43 +161,6 @@ HF_TOKEN=hf_xxx python3 run_inference_from_hub.py \
   --load_in_4bit
 ```
 
-## MLflow Logging
-
-The training pipeline can now log to your custom MLflow server when the MLflow
-environment variables are set before running the script.
-
-Example setup:
-
-```python
-import os
-from getpass import getpass
-
-os.environ["MLFLOW_TRACKING_USERNAME"] = getpass("Enter the MLFLOW_TRACKING_USERNAME: ")
-os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("Enter the MLFLOW_TRACKING_PASSWORD: ")
-os.environ["MLFLOW_TRACKING_URI"] = "https://mlflow.sunbird.ai/"
-os.environ["MLFLOW_EXPERIMENT_NAME"] = "med-gemma-adpater-exp"
-```
-
-Or from the shell:
-
-```bash
-export MLFLOW_TRACKING_USERNAME="..."
-export MLFLOW_TRACKING_PASSWORD="..."
-export MLFLOW_TRACKING_URI="https://mlflow.sunbird.ai/"
-export MLFLOW_EXPERIMENT_NAME="med-gemma-adpater-exp"
-```
-
-What gets logged:
-
-- live Trainer metrics through Hugging Face's MLflow reporter
-- per-leaf run parameters such as `dataset_id`, LoRA rank, learning rate, and sample counts
-- `adapter_meta.json` as an artifact
-- evaluation metrics prefixed with `eval_`
-- aggregate evaluation metrics and `eval_report.json`
-
-The pipeline only enables MLflow when `MLFLOW_TRACKING_URI` is set. If MLflow is
-not configured, training behaves exactly as before.
-
 ## Notes
 
 - Adapters are saved per dataset leaf, for example `adapter_eng_uga/`.

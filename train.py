@@ -45,15 +45,6 @@ from config import (
 )
 from data_utils import MultilingualDatasetBuilder, get_split
 from evaluation import MultilingualEvaluator
-from mlflow_utils import (
-    active_run_id,
-    configure_mlflow,
-    log_artifact,
-    log_dict,
-    log_metrics,
-    log_params,
-    start_mlflow_run,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -126,7 +117,6 @@ def build_sft_config(
     lang_cfg: LanguageConfig,
     adapter_output_dir: Path,
     has_eval: bool,
-    report_to: str,
     run_name: Optional[str],
 ) -> SFTConfig:
     """
@@ -156,7 +146,7 @@ def build_sft_config(
         "load_best_model_at_end": has_eval,
         "metric_for_best_model": "eval_loss",
         "greater_is_better": False,
-        "report_to": report_to,
+        "report_to": "none",
         "gradient_checkpointing": True,
         "dataset_text_field": "text",
         "packing": False,
@@ -198,7 +188,6 @@ def train_language_adapter(
 
     adapter_output_dir = output_root / f"adapter_{language}"
     adapter_output_dir.mkdir(parents=True, exist_ok=True)
-    mlflow_enabled = configure_mlflow()
     run_name = f"train_{language}"
 
     base_model, processor = load_base_model(cfg)
@@ -249,7 +238,6 @@ def train_language_adapter(
         lang_cfg=lang_cfg,
         adapter_output_dir=adapter_output_dir,
         has_eval=eval_text is not None,
-        report_to="mlflow" if mlflow_enabled else "none",
         run_name=run_name,
     )
 
@@ -270,62 +258,28 @@ def train_language_adapter(
         callbacks=callbacks,
     )
 
-    mlflow_tags = {
-        "stage": "train",
+    logger.info("Training %s adapter with %s train samples", language, len(train_text))
+    trainer.train()
+
+    model.save_pretrained(str(adapter_output_dir))
+    processor.save_pretrained(str(adapter_output_dir))
+
+    metadata = {
         "dataset_id": language,
         "language_code": lang_cfg.language_code,
+        "language_name": lang_cfg.language_name,
         "country_code": lang_cfg.country_code,
+        "country_name": lang_cfg.country_name,
+        "display_name": lang_cfg.display_name,
+        "lora_r": lang_cfg.lora_r,
+        "num_epochs": lang_cfg.num_epochs,
+        "learning_rate": lang_cfg.learning_rate,
+        "train_samples": len(train_text),
+        "dev_samples": len(eval_text) if eval_text is not None else 0,
         "base_model": cfg.model_id,
     }
-
-    logger.info("Training %s adapter with %s train samples", language, len(train_text))
-    with start_mlflow_run(run_name=run_name, tags=mlflow_tags):
-        log_params(
-            {
-                "dataset_id": language,
-                "language_code": lang_cfg.language_code,
-                "language_name": lang_cfg.language_name,
-                "country_code": lang_cfg.country_code,
-                "country_name": lang_cfg.country_name,
-                "resource_level": lang_cfg.resource_level,
-                "lora_r": lang_cfg.lora_r,
-                "num_epochs": lang_cfg.num_epochs,
-                "batch_size": lang_cfg.batch_size,
-                "grad_accumulation": lang_cfg.grad_accumulation,
-                "learning_rate": lang_cfg.learning_rate,
-                "train_samples": len(train_text),
-                "dev_samples": len(eval_text) if eval_text is not None else 0,
-                "base_model": cfg.model_id,
-                "max_seq_length": cfg.max_seq_length,
-            }
-        )
-
-        train_result = trainer.train()
-        log_metrics(train_result.metrics, prefix="train_")
-
-        model.save_pretrained(str(adapter_output_dir))
-        processor.save_pretrained(str(adapter_output_dir))
-
-        metadata = {
-            "dataset_id": language,
-            "language_code": lang_cfg.language_code,
-            "language_name": lang_cfg.language_name,
-            "country_code": lang_cfg.country_code,
-            "country_name": lang_cfg.country_name,
-            "display_name": lang_cfg.display_name,
-            "lora_r": lang_cfg.lora_r,
-            "num_epochs": lang_cfg.num_epochs,
-            "learning_rate": lang_cfg.learning_rate,
-            "train_samples": len(train_text),
-            "dev_samples": len(eval_text) if eval_text is not None else 0,
-            "base_model": cfg.model_id,
-            "mlflow_run_id": active_run_id(),
-        }
-        with open(adapter_output_dir / "adapter_meta.json", "w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, indent=2, ensure_ascii=False)
-
-        log_dict(metadata, "adapter_meta.json")
-        log_artifact(adapter_output_dir / "adapter_meta.json", artifact_path="metadata")
+    with open(adapter_output_dir / "adapter_meta.json", "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, ensure_ascii=False)
 
     logger.info("Adapter saved to %s", adapter_output_dir)
 
@@ -362,27 +316,6 @@ def load_adapter_for_inference(
     model.eval()
     logger.info("Loaded adapter for '%s' from %s", language, adapter_path)
     return model, processor
-
-
-def load_saved_run_id(adapter_output_dir: Path) -> Optional[str]:
-    """
-    Read the MLflow run id recorded in `adapter_meta.json`, if present.
-
-    This lets evaluation append metrics to the same run that captured training.
-    """
-
-    meta_path = adapter_output_dir / "adapter_meta.json"
-    if not meta_path.exists():
-        return None
-
-    try:
-        with open(meta_path, encoding="utf-8") as handle:
-            metadata = json.load(handle)
-    except Exception:
-        return None
-
-    run_id = metadata.get("mlflow_run_id")
-    return run_id if isinstance(run_id, str) and run_id else None
 
 
 def parse_args():
@@ -514,27 +447,6 @@ def main():
         max_eval_samples=args.max_eval_samples,
     )
     evaluator.save_report(results, output_root / "eval_report.json")
-
-    if configure_mlflow():
-        for lang_code, metrics in results["per_language"].items():
-            adapter_output_dir = output_root / f"adapter_{lang_code}"
-            run_id = load_saved_run_id(adapter_output_dir)
-            eval_tags = {
-                "stage": "evaluation",
-                "dataset_id": lang_code,
-            }
-            with start_mlflow_run(
-                run_name=f"eval_{lang_code}",
-                tags=eval_tags,
-                run_id=run_id,
-            ):
-                log_metrics(metrics, prefix="eval_")
-                log_dict(metrics, f"evaluation/{lang_code}.json")
-
-        with start_mlflow_run(run_name="evaluation_summary", tags={"stage": "evaluation_summary"}):
-            log_metrics(results.get("aggregate", {}), prefix="aggregate_")
-            log_artifact(output_root / "eval_report.json", artifact_path="reports")
-
     logger.info("All done.")
 
 

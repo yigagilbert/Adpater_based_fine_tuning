@@ -15,9 +15,6 @@ rouge-score>=0.1.2
 # Optional: better semantic similarity metric
 # sentence-transformers>=3.0.0   # for BERTScore with multilingual-mpnet-base-v2
 
-# Experiment tracking
-mlflow>=2.17.0
-
 # Utilities
 Pillow>=10.0.0
 numpy>=1.26.0
