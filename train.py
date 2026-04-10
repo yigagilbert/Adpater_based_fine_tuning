@@ -33,7 +33,12 @@ from typing import Optional
 import torch
 from datasets import DatasetDict
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+from transformers import (
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    BitsAndBytesConfig,
+    DataCollatorForLanguageModeling,
+)
 from transformers import EarlyStoppingCallback
 from trl import SFTConfig, SFTTrainer
 
@@ -44,7 +49,7 @@ from config import (
     expand_language_selection,
 )
 from data_utils import MultilingualDatasetBuilder, get_split
-from evaluation import MultilingualEvaluator
+from evaluation import MultilingualEvaluator, resolve_adapter_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -127,6 +132,22 @@ def build_sft_config(
     keeps the project tolerant to that variation.
     """
 
+    use_bf16 = bool(
+        torch.cuda.is_available()
+        and hasattr(torch.cuda, "is_bf16_supported")
+        and torch.cuda.is_bf16_supported()
+    )
+    use_fp16 = bool(torch.cuda.is_available() and not use_bf16)
+
+    if use_bf16:
+        logger.info("Using BF16 mixed precision for training.")
+    elif use_fp16:
+        logger.info("BF16 is unavailable on this GPU; falling back to FP16 training.")
+    else:
+        logger.warning(
+            "No CUDA device detected. Training MedGemma on CPU is likely impractical."
+        )
+
     kwargs = {
         "output_dir": str(adapter_output_dir),
         "num_train_epochs": lang_cfg.num_epochs,
@@ -136,16 +157,17 @@ def build_sft_config(
         "learning_rate": lang_cfg.learning_rate,
         "lr_scheduler_type": "cosine",
         "warmup_ratio": 0.05,
-        "fp16": False,
-        "bf16": True,
+        "fp16": use_fp16,
+        "bf16": use_bf16,
         "logging_steps": 10,
         "eval_steps": 50 if has_eval else None,
         "save_strategy": "steps",
-        "save_steps": 100,
-        "save_total_limit": 3,
-        "load_best_model_at_end": has_eval,
-        "metric_for_best_model": "eval_loss",
-        "greater_is_better": False,
+        # Checkpoint writes were failing on the VM when optimizer state was
+        # serialized every 100 steps. Save less often and avoid best-model
+        # reloading so PEFT's nested checkpoint layout does not block training.
+        "save_steps": 500,
+        "save_total_limit": 2,
+        "load_best_model_at_end": False,
         "report_to": "none",
         "gradient_checkpointing": True,
         "dataset_text_field": "text",
@@ -158,6 +180,17 @@ def build_sft_config(
         kwargs["eval_strategy"] = "steps" if has_eval else "no"
     else:
         kwargs["evaluation_strategy"] = "steps" if has_eval else "no"
+
+    if "dataset_kwargs" in params:
+        # Gemma 3 requires `token_type_ids` during training. We pretokenize the
+        # dataset ourselves so TRL does not drop that field in its generic text
+        # preprocessing path.
+        kwargs["dataset_kwargs"] = {"skip_prepare_dataset": True}
+
+    if "save_only_model" in params:
+        # Optimizer checkpoints are by far the largest files in this run and
+        # were the direct source of serialization failures on disk.
+        kwargs["save_only_model"] = True
 
     if "max_length" in params:
         kwargs["max_length"] = cfg.max_seq_length
@@ -233,6 +266,35 @@ def train_language_adapter(
     if eval_ds is not None and len(eval_ds) > 0:
         eval_text = eval_ds.map(format_sample, remove_columns=eval_ds.column_names)
 
+    def tokenize_batch(batch):
+        eos_token = processor.tokenizer.eos_token or ""
+        texts = []
+        for text in batch["text"]:
+            if eos_token and not text.endswith(eos_token):
+                text = f"{text}{eos_token}"
+            texts.append(text)
+
+        tokenized = processor.tokenizer(
+            texts,
+            truncation=True,
+            max_length=cfg.max_seq_length,
+            padding=False,
+            return_attention_mask=True,
+        )
+
+        if "token_type_ids" not in tokenized:
+            tokenized["token_type_ids"] = [
+                [0] * len(input_ids) for input_ids in tokenized["input_ids"]
+            ]
+
+        return tokenized
+
+    logger.info("[%s] Tokenizing dataset with explicit token_type_ids for Gemma 3.", language)
+    train_tokens = train_text.map(tokenize_batch, batched=True, remove_columns=train_text.column_names)
+    eval_tokens = None
+    if eval_text is not None:
+        eval_tokens = eval_text.map(tokenize_batch, batched=True, remove_columns=eval_text.column_names)
+
     sft_cfg = build_sft_config(
         cfg=cfg,
         lang_cfg=lang_cfg,
@@ -242,23 +304,34 @@ def train_language_adapter(
     )
 
     callbacks = []
-    if eval_text is not None and lang_cfg.early_stopping_patience:
+    use_early_stopping = bool(
+        eval_text is not None
+        and lang_cfg.early_stopping_patience
+        and getattr(sft_cfg, "load_best_model_at_end", False)
+    )
+    if use_early_stopping:
         callbacks.append(
             EarlyStoppingCallback(
                 early_stopping_patience=lang_cfg.early_stopping_patience,
             )
         )
 
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=processor.tokenizer,
+        mlm=False,
+    )
+
     trainer = SFTTrainer(
         model=model,
         args=sft_cfg,
-        train_dataset=train_text,
-        eval_dataset=eval_text,
-        processing_class=processor,
+        train_dataset=train_tokens,
+        eval_dataset=eval_tokens,
+        processing_class=processor.tokenizer,
+        data_collator=data_collator,
         callbacks=callbacks,
     )
 
-    logger.info("Training %s adapter with %s train samples", language, len(train_text))
+    logger.info("Training %s adapter with %s train samples", language, len(train_tokens))
     trainer.train()
 
     model.save_pretrained(str(adapter_output_dir))
@@ -274,8 +347,8 @@ def train_language_adapter(
         "lora_r": lang_cfg.lora_r,
         "num_epochs": lang_cfg.num_epochs,
         "learning_rate": lang_cfg.learning_rate,
-        "train_samples": len(train_text),
-        "dev_samples": len(eval_text) if eval_text is not None else 0,
+        "train_samples": len(train_tokens),
+        "dev_samples": len(eval_tokens) if eval_tokens is not None else 0,
         "base_model": cfg.model_id,
     }
     with open(adapter_output_dir / "adapter_meta.json", "w", encoding="utf-8") as handle:
@@ -305,11 +378,11 @@ def load_adapter_for_inference(
     """
 
     base_model, processor = load_base_model(cfg)
-    adapter_path = output_root / f"adapter_{language}"
+    adapter_path = resolve_adapter_path(output_root, language)
 
-    if not adapter_path.exists():
+    if adapter_path is None:
         raise FileNotFoundError(
-            f"No adapter found for dataset '{language}' at {adapter_path}. Run training first."
+            f"No adapter found for dataset '{language}' under {output_root}. Run training first."
         )
 
     model = PeftModel.from_pretrained(base_model, str(adapter_path))
@@ -408,7 +481,7 @@ def main():
     except KeyError as exc:
         raise SystemExit(
             f"Unsupported language or dataset selection: {exc.args[0]}. "
-            f"Supported values: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | set(['aka', 'eng', 'lug', 'swa'])))}"
+            f"Supported values: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | set(['aka', 'amh', 'eng', 'lug', 'swa'])))}"
         ) from exc
 
     cfg = TrainingConfig()

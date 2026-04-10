@@ -54,6 +54,26 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def resolve_publish_dir(adapter_root: Path, dataset_id: str) -> Path:
+    """
+    Resolve the folder that actually contains the PEFT adapter files.
+
+    Training with a named adapter can produce either:
+    * adapter_<id>/adapter_config.json
+    * adapter_<id>/<id>/adapter_config.json
+    """
+
+    flat_config = adapter_root / "adapter_config.json"
+    nested_dir = adapter_root / dataset_id
+    nested_config = nested_dir / "adapter_config.json"
+
+    if flat_config.exists():
+        return adapter_root
+    if nested_config.exists():
+        return nested_dir
+    return adapter_root
+
+
 def parse_args():
     """Define CLI arguments for publishing adapters to a model repository."""
 
@@ -128,7 +148,10 @@ def resolve_adapter_dirs(output_root: Path, selections: list[str] | None) -> lis
             "The following adapter directories were not found:\n" + "\n".join(missing)
         )
 
-    return adapter_dirs
+    return [
+        (dataset_id, resolve_publish_dir(adapter_dir, dataset_id))
+        for dataset_id, adapter_dir in adapter_dirs
+    ]
 
 
 def load_adapter_metadata(adapter_dir: Path, dataset_id: str) -> dict:

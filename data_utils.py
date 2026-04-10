@@ -4,16 +4,22 @@ data_utils.py — Dataset access, validation, and augmentation for SRH shards
 
 Expected dataset layouts
 ------------------------
-This module is written around your real multilingual SRH dataset, whose leaves
-look like:
+This module is written around your multilingual SRH dataset. Different mirrors
+have used either nested leaves:
 
     eng/eng_uga/train-*
     eng/eng_uga/dev-*
     eng/eng_uga/test-*
 
+or flatter leaf directories:
+
+    eng_uga/train-*
+    eng_uga/dev-*
+    eng_uga/test-*
+
 Supported sources:
 1. A Hugging Face dataset repo containing shard globs such as
-   `eng/eng_uga/train-*`
+   `eng/eng_uga/train-*` or `eng_uga/train-*`
 2. A local mirror of that same shard tree
 3. A local `DatasetDict.save_to_disk()` mirror created after download
 
@@ -191,11 +197,13 @@ class MultilingualDatasetBuilder:
         if self.dataset_repo:
             return self._load_hub_shards(lang_cfg)
 
-        expected = (
-            f"{lang_cfg.hub_subdir}/train-* under {self.data_root}"
-            if self.data_root
-            else lang_cfg.hub_subdir
-        )
+        if self.data_root:
+            expected = " or ".join(
+                f"{subdir}/train-* under {self.data_root}"
+                for subdir in lang_cfg.shard_subdirs
+            )
+        else:
+            expected = " or ".join(lang_cfg.shard_subdirs)
         raise FileNotFoundError(
             f"Could not locate dataset '{lang_code}'. Expected local save_to_disk data, "
             f"local shard files, or a Hub dataset repo. Last expected location: {expected}"
@@ -218,32 +226,36 @@ class MultilingualDatasetBuilder:
         """
         Load a local tree of shard files that preserves the Hub directory layout.
 
-        Example:
+        Examples:
             <data_root>/eng/eng_uga/train-00000-of-00001.parquet
+            <data_root>/eng_uga/train-00000-of-00001.parquet
         """
         if not self.data_root:
             return None
 
-        shard_dir = self.data_root / lang_cfg.hub_subdir
-        if not shard_dir.exists():
-            return None
+        for subdir in lang_cfg.shard_subdirs:
+            shard_dir = self.data_root / subdir
+            if not shard_dir.exists():
+                continue
 
-        matches_by_split: dict[str, list[Path]] = {}
-        for split_name in CANONICAL_SPLITS:
-            matches = sorted(shard_dir.glob(f"{split_name}-*"))
-            if matches:
-                matches_by_split[split_name] = matches
+            matches_by_split: dict[str, list[Path]] = {}
+            for split_name in CANONICAL_SPLITS:
+                matches = sorted(shard_dir.glob(f"{split_name}-*"))
+                if matches:
+                    matches_by_split[split_name] = matches
 
-        if not matches_by_split:
-            return None
+            if not matches_by_split:
+                continue
 
-        builder_name = self._infer_builder(matches_by_split)
-        data_files = {
-            split_name: [str(path) for path in matches]
-            for split_name, matches in matches_by_split.items()
-        }
-        logger.info("[%s] Loading local shard files from %s", lang_cfg.dataset_id, shard_dir)
-        return load_dataset(builder_name, data_files=data_files, cache_dir=self.cache_dir)
+            builder_name = self._infer_builder(matches_by_split)
+            data_files = {
+                split_name: [str(path) for path in matches]
+                for split_name, matches in matches_by_split.items()
+            }
+            logger.info("[%s] Loading local shard files from %s", lang_cfg.dataset_id, shard_dir)
+            return load_dataset(builder_name, data_files=data_files, cache_dir=self.cache_dir)
+
+        return None
 
     def _infer_builder(self, matches_by_split: dict[str, list[Path]]) -> str:
         """
@@ -280,7 +292,7 @@ class MultilingualDatasetBuilder:
         requiring a bespoke dataset loading script in this project.
         """
         data_files = {
-            split_name: lang_cfg.split_glob(split_name)
+            split_name: lang_cfg.split_globs(split_name)
             for split_name in CANONICAL_SPLITS
         }
 

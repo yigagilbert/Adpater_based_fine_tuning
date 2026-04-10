@@ -45,6 +45,22 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def resolve_adapter_dir(adapter_root: Path, adapter_name: str) -> Path:
+    """
+    Resolve either a flat published adapter folder or a nested named-adapter folder.
+    """
+
+    flat_config = adapter_root / "adapter_config.json"
+    nested_dir = adapter_root / adapter_name
+    nested_config = nested_dir / "adapter_config.json"
+
+    if flat_config.exists():
+        return adapter_root
+    if nested_config.exists():
+        return nested_dir
+    return adapter_root
+
+
 def parse_args():
     """Define CLI arguments for downloading and running one adapter leaf."""
 
@@ -123,12 +139,12 @@ def download_adapter(adapter_repo: str, adapter_name: str, revision: str | None,
         cache_dir=cache_dir,
         token=hf_token,
     )
-    adapter_dir = Path(snapshot_dir) / "adapters" / adapter_name
-    if not adapter_dir.exists():
+    adapter_root = Path(snapshot_dir) / "adapters" / adapter_name
+    if not adapter_root.exists():
         raise FileNotFoundError(
             f"Adapter '{adapter_name}' was not found under adapters/{adapter_name} in {adapter_repo}"
         )
-    return adapter_dir
+    return resolve_adapter_dir(adapter_root, adapter_name)
 
 
 def load_adapter_metadata(adapter_dir: Path) -> dict:

@@ -38,6 +38,30 @@ from data_utils import MultilingualDatasetBuilder, get_split
 logger = logging.getLogger(__name__)
 
 
+def resolve_adapter_path(adapter_root: Path, lang_code: str) -> Optional[Path]:
+    """
+    Resolve either a flat PEFT save or a named-adapter nested save.
+
+    PEFT commonly stores non-default adapters under a child folder named after
+    the adapter, e.g. `adapter_amh_eth/amh_eth/adapter_config.json`.
+    """
+
+    adapter_dir = adapter_root / f"adapter_{lang_code}"
+    if not adapter_dir.exists():
+        return None
+
+    flat_config = adapter_dir / "adapter_config.json"
+    nested_dir = adapter_dir / lang_code
+    nested_config = nested_dir / "adapter_config.json"
+
+    if flat_config.exists():
+        return adapter_dir
+    if nested_config.exists():
+        return nested_dir
+
+    return adapter_dir
+
+
 def _token_f1(prediction: str, ground_truth: str) -> float:
     pred_tokens = prediction.lower().split()
     gt_tokens = ground_truth.lower().split()
@@ -123,8 +147,8 @@ class MultilingualEvaluator:
     def _load_adapter(self, lang_code: str):
         """Attach a trained leaf-specific adapter onto the shared base model."""
         self._ensure_base_loaded()
-        adapter_path = self.adapter_root / f"adapter_{lang_code}"
-        if not adapter_path.exists():
+        adapter_path = resolve_adapter_path(self.adapter_root, lang_code)
+        if adapter_path is None:
             logger.warning("Adapter not found for %s; skipping evaluation.", lang_code)
             return None, None
 

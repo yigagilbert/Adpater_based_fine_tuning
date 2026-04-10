@@ -68,8 +68,35 @@ class LanguageConfig:
     def hub_subdir(self) -> str:
         return f"{self.language_code}/{self.dataset_id}"
 
+    @property
+    def shard_subdirs(self) -> tuple[str, ...]:
+        """
+        Supported shard directory layouts for this dataset leaf.
+
+        We prefer the nested `<language>/<dataset_id>/` layout because that is
+        what the original project documentation described. Some mirrors differ
+        in both nesting and casing, for example `aka/aka_gha/` versus
+        `Aka/Aka_Gha/`, so we accept both to keep data loading resilient across
+        local exports and Hub repos.
+        """
+
+        candidates = (
+            self.hub_subdir,
+            self.dataset_id,
+            f"{self._title_case_token(self.language_code)}/{self._title_case_token(self.dataset_id)}",
+            self._title_case_token(self.dataset_id),
+        )
+        return tuple(dict.fromkeys(candidates))
+
     def split_glob(self, split_name: str) -> str:
         return f"{self.hub_subdir}/{split_name}-*"
+
+    def split_globs(self, split_name: str) -> list[str]:
+        return [f"{subdir}/{split_name}-*" for subdir in self.shard_subdirs]
+
+    @staticmethod
+    def _title_case_token(value: str) -> str:
+        return "_".join(part.capitalize() for part in value.split("_"))
 
 
 SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
@@ -87,6 +114,21 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         learning_rate=1e-4,
         early_stopping_patience=5,
         transfer_from="eng_gha",
+    ),
+    # ── Amharic / Ethiopia ──────────────────────────────────────────────────
+    "amh_eth": LanguageConfig(
+        dataset_id="amh_eth",
+        language_code="amh",
+        language_name="Amharic",
+        country_code="eth",
+        country_name="Ethiopia",
+        script="geez",
+        resource_level="low",
+        lora_r=16,
+        num_epochs=10,
+        learning_rate=1e-4,
+        early_stopping_patience=5,
+        transfer_from="eng_eth",
     ),
     # ── English variants ────────────────────────────────────────────────────
     "eng_eth": LanguageConfig(
@@ -189,6 +231,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
 
 LANGUAGE_GROUPS: dict[str, list[str]] = {
     "aka": ["aka_gha"],
+    "amh": ["amh_eth"],
     "eng": ["eng_eth", "eng_gha", "eng_ken", "eng_uga"],
     "lug": ["lug_uga"],
     "swa": ["swa_ken", "swa_uga"],

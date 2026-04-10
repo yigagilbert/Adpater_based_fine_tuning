@@ -2,8 +2,8 @@
 
 This codebase is now aligned to a Hugging Face-hosted multilingual SRH dataset that uses:
 
-- ISO 639-2/3 language codes: `aka`, `eng`, `lug`, `swa`
-- Dataset leaves with country suffixes: `aka_gha`, `eng_uga`, `swa_ken`, etc.
+- ISO 639-2/3 language codes: `aka`, `amh`, `eng`, `lug`, `swa`
+- Dataset leaves with country suffixes: `aka_gha`, `amh_eth`, `eng_uga`, `swa_ken`, etc.
 - `dev` instead of `validation`
 - shard globs such as `train-*`, `dev-*`, and `test-*`
 - two required columns per split: `input` and `output`
@@ -13,6 +13,11 @@ This codebase is now aligned to a Hugging Face-hosted multilingual SRH dataset t
 ```text
 aka/
 └── aka_gha/
+    ├── train-*
+    ├── dev-*
+    └── test-*
+amh/
+└── amh_eth/
     ├── train-*
     ├── dev-*
     └── test-*
@@ -46,13 +51,14 @@ The training registry treats each leaf like `eng_uga` or `swa_ken` as a first-cl
 ```bash
 HF_TOKEN=hf_xxx python3 train.py \
   --dataset_repo your-org/your-srh-dataset \
-  --languages aka eng lug swa \
+  --languages aka amh eng lug swa \
   --output_root ./adapters
 ```
 
 Grouped selections expand as follows:
 
 - `aka` -> `aka_gha`
+- `amh` -> `amh_eth`
 - `eng` -> `eng_eth eng_gha eng_ken eng_uga`
 - `lug` -> `lug_uga`
 - `swa` -> `swa_ken swa_uga`
@@ -71,7 +77,7 @@ HF_TOKEN=hf_xxx python3 train.py \
 ```bash
 python3 prepare_data.py \
   --dataset_repo your-org/your-srh-dataset \
-  --languages eng swa \
+  --languages amh eng swa \
   --output_root ./data
 ```
 
@@ -79,6 +85,7 @@ This writes local `DatasetDict.save_to_disk()` mirrors like:
 
 ```text
 data/
+├── amh_eth/
 ├── eng_eth/
 ├── eng_gha/
 ├── eng_ken/
@@ -92,7 +99,7 @@ After mirroring, training can run without `--dataset_repo`:
 ```bash
 HF_TOKEN=hf_xxx python3 train.py \
   --data_root ./data \
-  --languages eng swa \
+  --languages amh eng swa \
   --output_root ./adapters
 ```
 
@@ -102,7 +109,7 @@ HF_TOKEN=hf_xxx python3 train.py \
 python3 train.py \
   --eval_only \
   --dataset_repo your-org/your-srh-dataset \
-  --languages aka eng lug swa \
+  --languages aka amh eng lug swa \
   --output_root ./adapters
 ```
 
